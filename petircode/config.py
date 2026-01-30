@@ -35,10 +35,12 @@ class Config:
     DEEPSEEK_API_URL = os.getenv('DEEPSEEK_API_URL', 'https://api.deepseek.com/v1/chat/completions')
     DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')
 
-    # Claude Code CLI settings
-    CLAUDE_CLI_PATH = os.getenv('CLAUDE_CLI_PATH', 'claude')
+    # Claude API settings
+    CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY', '')
+    CLAUDE_API_URL = os.getenv('CLAUDE_API_URL', 'https://api.anthropic.com/v1/messages')
+    CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-20250514')
     CLAUDE_TIMEOUT = int(os.getenv('CLAUDE_TIMEOUT', '300'))
-    CLAUDE_WORK_DIR = os.getenv('CLAUDE_WORK_DIR', r'C:\workspace\claudework')
+    CLAUDE_WORK_DIR = os.getenv('CLAUDE_WORK_DIR', r'C:\workspace\claudecodelabspace')
 
     @classmethod
     def validate(cls):

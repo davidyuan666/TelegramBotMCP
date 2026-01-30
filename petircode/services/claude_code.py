@@ -1,9 +1,8 @@
 """
-System command execution service for computer operations
+Claude API service for computer operations
 """
 import logging
-import asyncio
-import os
+import aiohttp
 from ..config import config
 
 logger = logging.getLogger(__name__)
@@ -11,10 +10,10 @@ logger = logging.getLogger(__name__)
 
 async def execute_claude_code(operation: str, timeout: int = None) -> dict:
     """
-    Execute system command via PowerShell in specified working directory
+    Execute computer operation via Claude API with computer use tool
 
     Args:
-        operation: The command to execute
+        operation: The operation description to execute
         timeout: Timeout in seconds (default: from config)
 
     Returns:
@@ -30,103 +29,105 @@ async def execute_claude_code(operation: str, timeout: int = None) -> dict:
     if timeout is None:
         timeout = config.CLAUDE_TIMEOUT
 
-    # Parse operation to system command
-    command = _parse_operation_to_command(operation)
+    if not config.CLAUDE_API_KEY:
+        raise ValueError("CLAUDE_API_KEY is not configured")
 
-    # Build PowerShell command to change directory and run command
-    powershell_cmd = (
-        f'powershell.exe -NoProfile -Command "'
-        f'cd \'{config.CLAUDE_WORK_DIR}\'; '
-        f'{command}"'
-    )
-
-    logger.info(f"Executing command: {command}")
+    logger.info(f"Executing operation via Claude API: {operation}")
     logger.info(f"Working directory: {config.CLAUDE_WORK_DIR}")
 
+    headers = {
+        "x-api-key": config.CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+    }
+
+    # Build request payload with computer use tool
+    payload = {
+        "model": config.CLAUDE_MODEL,
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": f"Please execute this operation in the directory {config.CLAUDE_WORK_DIR}: {operation}"
+            }
+        ],
+        "tools": [
+            {
+                "type": "computer_20241022",
+                "name": "computer",
+                "display_width_px": 1024,
+                "display_height_px": 768,
+                "display_number": 1
+            },
+            {
+                "type": "bash_20241022",
+                "name": "bash"
+            }
+        ]
+    }
+
     try:
-        # Create subprocess to run PowerShell command
-        process = await asyncio.create_subprocess_shell(
-            powershell_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(
+                config.CLAUDE_API_URL,
+                headers=headers,
+                json=payload
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Claude API error: {response.status} - {error_text}")
+                    raise Exception(f"API returned status {response.status}: {error_text}")
 
-        # Wait for completion with timeout
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            raise Exception(f"Operation timed out after {timeout} seconds")
+                data = await response.json()
+                logger.info(f"API response received")
 
-        # Decode output
-        stdout_text = stdout.decode('utf-8', errors='replace')
-        stderr_text = stderr.decode('utf-8', errors='replace')
+                # Extract result from response
+                result_text = _extract_result_from_response(data)
 
-        logger.info(f"Command completed with return code: {process.returncode}")
+                return {
+                    'stdout': result_text,
+                    'stderr': '',
+                    'return_code': 0,
+                    'success': True
+                }
 
-        return {
-            'stdout': stdout_text,
-            'stderr': stderr_text,
-            'return_code': process.returncode,
-            'success': process.returncode == 0
-        }
-
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error calling Claude API: {e}", exc_info=True)
+        raise Exception(f"Network error: {str(e)}")
     except Exception as e:
-        logger.error(f"Error executing command: {e}", exc_info=True)
+        logger.error(f"Error executing via Claude API: {e}", exc_info=True)
         raise
 
 
-def _parse_operation_to_command(operation: str) -> str:
+def _extract_result_from_response(data: dict) -> str:
     """
-    Parse natural language operation to system command
+    Extract result text from Claude API response
 
     Args:
-        operation: Natural language description or direct command
+        data: API response data
 
     Returns:
-        System command string
+        Extracted result text
     """
-    operation_lower = operation.lower().strip()
+    try:
+        # Extract content from response
+        if "content" in data and len(data["content"]) > 0:
+            result_parts = []
+            for content_block in data["content"]:
+                if content_block.get("type") == "text":
+                    result_parts.append(content_block.get("text", ""))
+                elif content_block.get("type") == "tool_use":
+                    # Extract tool result if available
+                    tool_result = content_block.get("content", "")
+                    if tool_result:
+                        result_parts.append(str(tool_result))
 
-    # List files
-    if 'list' in operation_lower and 'file' in operation_lower:
-        return 'Get-ChildItem | Format-Table Name, Length, LastWriteTime'
+            return "\n".join(result_parts) if result_parts else "Operation completed"
+        else:
+            return "No response content"
 
-    # Show current directory
-    if 'current' in operation_lower and ('directory' in operation_lower or 'dir' in operation_lower):
-        return 'Get-Location'
+    except Exception as e:
+        logger.error(f"Error extracting result: {e}")
+        return f"Error parsing response: {str(e)}"
 
-    # Create file
-    if 'create' in operation_lower and 'file' in operation_lower:
-        # Extract filename
-        words = operation.split()
-        filename = None
-        for i, word in enumerate(words):
-            if word.lower() in ['file', 'named', 'called', 'name']:
-                if i + 1 < len(words):
-                    filename = words[i + 1].strip('.,;:')
-                    break
-
-        if filename:
-            # Check if content is specified
-            if 'content' in operation_lower or 'with' in operation_lower:
-                # Extract content after "content" or "with"
-                content_start = max(
-                    operation.lower().find('content'),
-                    operation.lower().find('with')
-                )
-                if content_start > 0:
-                    content = operation[content_start:].split(None, 1)
-                    if len(content) > 1:
-                        content_text = content[1].strip('"\'')
-                        return f'Set-Content -Path "{filename}" -Value "{content_text}"'
-
-            # Create empty file
-            return f'New-Item -Path "{filename}" -ItemType File -Force'
-
-    # Default: treat as direct PowerShell command
-    return operation
